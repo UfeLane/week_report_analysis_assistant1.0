@@ -31,13 +31,13 @@ def main():
         except Exception as e:
             reuse = 'n'
         if reuse == 'y':
-            # 询问意图名称/目录/周次
             意图名称 = input("请输入分析意图名称：").strip()
             output_dir = input("请输入图片导出目录（如'output/reports'）：").strip()
             week_names = input("请输入参与的week名（英文逗号分隔，如'Week3,Week4'）：").split(',')
             plot_weeks_compare(GLOBAL_AGG, output_dir, 意图名称, week_names)
             print('绘图完毕。')
             return
+
     # ==================
     # 数据加载流程
     # ==================
@@ -73,7 +73,12 @@ def main():
         print("缺少 '意图问题' 字段！")
         return
 
-    required_columns = ['大模型', '提问次数', '推荐次数', '前三名次数', '第一名次数']
+    required_columns = [
+        '大模型', '提问次数', '推荐次数', '前三名次数', '第一名次数',
+        # 引用相关指标
+        '总引用文章篇次', '我司发布文章总引用篇次', '总引用文章篇数', '我司发布文章总引用篇数',
+        '正文引用文章篇次', '我司发布文章正文引用篇次', '正文引用文章篇数', '我司发布文章正文引用篇数'
+    ]
     for col in required_columns:
         if col not in df.columns:
             print(f"缺失字段：{col}")
@@ -115,10 +120,23 @@ def main():
             print("该意图在所有数据中无数据！")
             continue
 
-        for col in required_columns[1:]:
-            意图_data[col] = pd.to_numeric(意图_data[col], errors='coerce')
+        # 全部转数值类型
+        num_fields = [
+            '提问次数', '推荐次数', '前三名次数', '第一名次数',
+            # 引用相关字段
+            '总引用文章篇次', '我司发布文章总引用篇次', '总引用文章篇数', '我司发布文章总引用篇数',
+            '正文引用文章篇次', '我司发布文章正文引用篇次', '正文引用文章篇数', '我司发布文章正文引用篇数'
+        ]
+        for col in num_fields:
+            if col in 意图_data.columns:
+                意图_data[col] = pd.to_numeric(意图_data[col], errors='coerce')
 
-        # 按已保存week设置切分
+        # 自动补充占比和强度衍生字段
+        意图_data['我司正文引用占比（次数口径）'] = 意图_data['我司发布文章正文引用篇次'] / 意图_data['正文引用文章篇次']
+        意图_data['我司正文引用占比（篇数口径）'] = 意图_data['我司发布文章正文引用篇数'] / 意图_data['正文引用文章篇数']
+        # "我司正文引用强度"为例（可根据实际业务公式调整）
+        意图_data['我司正文引用强度'] = 意图_data['我司发布文章正文引用篇次'] / 意图_data['提问次数']
+
         week_data_dict = get_week_data_for_all(意图_data, week_settings)
 
         agg_list = []
@@ -132,8 +150,21 @@ def main():
                 '提问次数': 'sum',
                 '推荐次数': 'sum',
                 '前三名次数': 'sum',
-                '第一名次数': 'sum'
+                '第一名次数': 'sum',
+                # 引用相关聚合
+                '总引用文章篇次': 'sum',
+                '我司发布文章总引用篇次': 'sum',
+                '总引用文章篇数': 'sum',
+                '我司发布文章总引用篇数': 'sum',
+                '正文引用文章篇次': 'sum',
+                '我司发布文章正文引用篇次': 'sum',
+                '正文引用文章篇数': 'sum',
+                '我司发布文章正文引用篇数': 'sum',
+                '我司正文引用占比（次数口径）': 'mean',
+                '我司正文引用占比（篇数口径）': 'mean',
+                '我司正文引用强度': 'mean',
             }).reset_index()
+            # 主要业务衍生字段
             agg['推荐率'] = agg['推荐次数'] / agg['提问次数']
             agg['前三率'] = agg['前三名次数'] / agg['提问次数']
             agg['置顶率'] = agg['第一名次数'] / agg['提问次数']
@@ -153,18 +184,29 @@ def main():
             weekB = f"Week{week_nums[1]}"
             dfA = all_agg[all_agg['week'] == weekA].set_index('大模型')
             dfB = all_agg[all_agg['week'] == weekB].set_index('大模型')
-            for rate in ['推荐率', '前三率', '置顶率']:
+            # 环比指标列表
+            rate_fields = [
+                '推荐率', '前三率', '置顶率',
+                '我司正文引用强度',
+                '我司正文引用占比（次数口径）',
+                '我司正文引用占比（篇数口径）',
+            ]
+            for rate in rate_fields:
                 valid_models = set(dfA.index) & set(dfB.index)
                 for model in valid_models:
                     base = dfA.loc[model, rate]
                     now = dfB.loc[model, rate]
-                    if base != 0:
-                        val = round((now - base) / base * 100, 2)
+                    if pd.notnull(base) and pd.notnull(now) and base != 0:
+                        try:
+                            val = round((now - base) / base * 100, 2)
+                            if np.isinf(val) or np.isnan(val):
+                                val = None
+                        except:
+                            val = None
                     else:
                         val = None
-                    all_agg.loc[(all_agg['大模型'] == model) & (all_agg['week'] == weekB), rate + '环比'] = val
+                    all_agg.loc[(all_agg['大模型'] == model) & (all_agg['week'] == weekB), rate + '_增速'] = val
 
-        # 导出
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
         output_dir = os.path.join(BASE_DIR, 'output', 'reports')
         os.makedirs(output_dir, exist_ok=True)
@@ -173,10 +215,8 @@ def main():
         all_agg.to_csv(outcsv, index=False, encoding='utf-8-sig')
         print(f"已导出统计数据: {outcsv}")
 
-        # 画图
         plot_weeks_compare(all_agg, output_dir, 意图名称, week_str_list)
 
-        # 是否继续分析
         goon = input("\n是否要继续分析其他意图？(y/n)：").strip().lower()
         if goon != 'y':
             print("已退出。")
